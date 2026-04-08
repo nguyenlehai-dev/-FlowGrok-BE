@@ -5,6 +5,16 @@ set -euo pipefail
 ENVIRONMENT="${1:-}"
 SKIP_BACKUP="${SKIP_BACKUP:-0}"
 
+if docker info >/dev/null 2>&1; then
+  DOCKER_COMPOSE=(docker compose)
+elif sudo -n docker info >/dev/null 2>&1; then
+  DOCKER_COMPOSE=(sudo docker compose)
+else
+  echo "Docker daemon is not accessible for user $(id -un)."
+  echo "Run with a user in the docker group or configure passwordless sudo for docker."
+  exit 1
+fi
+
 case "$ENVIRONMENT" in
   staging|prod)
     ;;
@@ -20,8 +30,8 @@ if [[ "$SKIP_BACKUP" != "1" ]]; then
   echo "Created backup: $BACKUP_NAME"
 fi
 
-docker compose build
-docker compose up -d --build
-docker compose ps
+"${DOCKER_COMPOSE[@]}" build
+"${DOCKER_COMPOSE[@]}" up -d --build
+"${DOCKER_COMPOSE[@]}" ps
 
 echo "Deployed backend stack for $ENVIRONMENT"
