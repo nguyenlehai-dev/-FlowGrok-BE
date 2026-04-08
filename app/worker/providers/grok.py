@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from urllib.request import urlopen
 
 from app.services.playwright_runtime import (
+    build_browser_init_script,
     build_browser_context_kwargs,
     build_browser_launch_kwargs,
     get_playwright_sync_api,
@@ -22,6 +24,7 @@ class GrokAutomationProvider(ProviderAutomation):
         super().__init__(context)
         self._playwright = None
         self._browser = None
+        self._browser_context = None
         self._page = None
         self._boot_state: dict[str, object] = {}
 
@@ -31,17 +34,30 @@ class GrokAutomationProvider(ProviderAutomation):
             sync_playwright = get_playwright_sync_api()
             self._playwright = sync_playwright().start()
             launch_kwargs = build_browser_launch_kwargs(self.context)
-            self._browser = self._playwright.chromium.launch(**launch_kwargs)
             context_kwargs = build_browser_context_kwargs(self.context)
-            browser_context = self._browser.new_context(**context_kwargs)
-            self._page = browser_context.new_page()
+            storage_state_path = context_kwargs.pop("storage_state", None)
+            browser_dir = Path(self.context.browser_dir)
+            browser_dir.mkdir(parents=True, exist_ok=True)
+            self._browser_context = self._playwright.chromium.launch_persistent_context(
+                str(browser_dir),
+                **launch_kwargs,
+                **context_kwargs,
+            )
+            self._browser_context.add_init_script(build_browser_init_script(self.context))
+            self._page = self._browser_context.new_page()
+            self._hydrate_session_state(storage_state_path)
             self._page.set_default_timeout(
                 int((self.context.runtime_settings or {}).get("timeout_ms") or 120000)
+            )
+            self._page.set_default_navigation_timeout(
+                int((self.context.runtime_settings or {}).get("navigation_timeout_ms") or 60000)
             )
             self._boot_state = {
                 "browser": "chromium",
                 "headless": self.context.headless,
-                "storage_state_loaded": bool(context_kwargs.get("storage_state")),
+                "persistent_context": True,
+                "storage_state_loaded": bool(storage_state_path),
+                "browser_dir": str(browser_dir),
             }
             return self._boot_state
         except Exception as exc:
@@ -66,42 +82,23 @@ class GrokAutomationProvider(ProviderAutomation):
         }
 
     def login_with_cookies(self) -> dict[str, object]:
-        page = self._require_page()
         try:
-            page.goto("https://grok.com/", wait_until="domcontentloaded")
-            page.wait_for_timeout(2500)
-            title = page.title()
-            url = page.url
-            body_text = (page.locator("body").inner_text(timeout=5000) or "")[:1200]
-            lowered_body = body_text.lower()
-            lowered_title = title.lower()
-            has_challenge = any(
-                marker in lowered_body or marker in lowered_title
-                for marker in [
-                    "just a moment",
-                    "checking your browser",
-                    "verify you are human",
-                    "cf-browser-verification",
-                    "cloudflare",
-                ]
+            diagnostics = self._goto_grok()
+            prompt_visible = self._find_prompt_input() is not None
+            looks_logged_in = prompt_visible or (
+                not bool(diagnostics.get("has_challenge"))
+                and not bool(diagnostics.get("has_login_prompt"))
             )
-            has_login_prompt = any(
-                marker in lowered_body
-                for marker in [
-                    "sign in",
-                    "log in",
-                    "login",
-                    "continue with x",
-                ]
-            )
-            looks_logged_in = not has_challenge and not has_login_prompt
             return {
                 "provider": self.provider_name,
                 "status": "ok" if looks_logged_in else "cookie_needs_review",
-                "url": url,
-                "title": title,
+                "url": diagnostics.get("url"),
+                "title": diagnostics.get("title"),
                 "looks_logged_in": looks_logged_in,
-                "has_challenge": has_challenge,
+                "prompt_visible": prompt_visible,
+                "has_challenge": diagnostics.get("has_challenge"),
+                "has_login_prompt": diagnostics.get("has_login_prompt"),
+                "challenge_wait_ms": diagnostics.get("challenge_wait_ms"),
             }
         except Exception as exc:
             raise ProviderAutomationError(
@@ -118,10 +115,13 @@ class GrokAutomationProvider(ProviderAutomation):
 
     def close(self) -> None:
         try:
+            if self._browser_context is not None:
+                self._browser_context.close()
             if self._browser is not None:
                 self._browser.close()
         finally:
             self._browser = None
+            self._browser_context = None
             self._page = None
             if self._playwright is not None:
                 self._playwright.stop()
@@ -130,8 +130,7 @@ class GrokAutomationProvider(ProviderAutomation):
     def _generate(self, mode: str) -> list[ProviderArtifact]:
         page = self._require_page()
         try:
-            page.goto("https://grok.com/", wait_until="domcontentloaded")
-            page.wait_for_timeout(2500)
+            self._goto_grok()
 
             prompt_input = self._find_prompt_input()
             if prompt_input is None:
@@ -187,6 +186,135 @@ class GrokAutomationProvider(ProviderAutomation):
                 f"Grok {mode} execution failed: {exc}",
                 artifacts=self._collect_debug_artifacts(f"grok-{mode}-failed"),
             ) from exc
+
+    def _goto_grok(self) -> dict[str, object]:
+        page = self._require_page()
+        total_wait_ms = 0
+        for index, target_url in enumerate([
+            "https://grok.com/",
+            "https://grok.com/?source=flowgrok",
+            "https://grok.com/i",
+        ]):
+            page.goto(target_url, wait_until="domcontentloaded")
+            page.wait_for_timeout(2500)
+            total_wait_ms += 2500
+            state = self._read_page_state()
+            if not state["has_challenge"] and not state["has_login_prompt"]:
+                state["challenge_wait_ms"] = total_wait_ms
+                return state
+            if index == 0:
+                for wait_ms in [5000, 10000]:
+                    page.wait_for_timeout(wait_ms)
+                    total_wait_ms += wait_ms
+                    state = self._read_page_state()
+                    if not state["has_challenge"] and not state["has_login_prompt"]:
+                        state["challenge_wait_ms"] = total_wait_ms
+                        return state
+        state = self._read_page_state()
+        state["challenge_wait_ms"] = total_wait_ms
+        return state
+
+    def _hydrate_session_state(self, storage_state_path: str | None) -> None:
+        page = self._require_page()
+        browser_context = self._require_browser_context()
+        cookies, origins = self._load_session_state(storage_state_path)
+        if cookies:
+            browser_context.add_cookies(cookies)
+        for origin_state in origins:
+            origin = str(origin_state.get("origin") or "").strip()
+            local_storage_items = origin_state.get("localStorage") or []
+            if not origin or not isinstance(local_storage_items, list):
+                continue
+            try:
+                page.goto(origin, wait_until="domcontentloaded")
+                page.evaluate(
+                    """
+                    items => {
+                      for (const item of items) {
+                        if (!item || !item.name) continue;
+                        window.localStorage.setItem(String(item.name), String(item.value ?? ""));
+                      }
+                    }
+                    """,
+                    local_storage_items,
+                )
+            except Exception:
+                continue
+
+    def _load_session_state(self, storage_state_path: str | None) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+        cookies: list[dict[str, object]] = []
+        origins: list[dict[str, object]] = []
+
+        if storage_state_path and Path(storage_state_path).exists():
+            try:
+                payload = json.loads(Path(storage_state_path).read_text())
+                if isinstance(payload, dict):
+                    raw_cookies = payload.get("cookies") or []
+                    raw_origins = payload.get("origins") or []
+                    if isinstance(raw_cookies, list):
+                        cookies.extend([item for item in raw_cookies if isinstance(item, dict)])
+                    if isinstance(raw_origins, list):
+                        origins.extend([item for item in raw_origins if isinstance(item, dict)])
+            except Exception:
+                pass
+
+        normalized_cookie_path = self.context.normalized_cookie_path
+        if normalized_cookie_path and Path(normalized_cookie_path).exists():
+            try:
+                payload = json.loads(Path(normalized_cookie_path).read_text())
+                if isinstance(payload, list):
+                    cookies.extend([item for item in payload if isinstance(item, dict)])
+                elif isinstance(payload, dict) and isinstance(payload.get("cookies"), list):
+                    cookies.extend([item for item in payload["cookies"] if isinstance(item, dict)])
+            except Exception:
+                pass
+
+        deduped_cookies: dict[tuple[str, str, str], dict[str, object]] = {}
+        for item in cookies:
+            name = str(item.get("name") or "").strip()
+            domain = str(item.get("domain") or "").strip()
+            path = str(item.get("path") or "/").strip() or "/"
+            if not name or not domain:
+                continue
+            deduped_cookies[(name, domain, path)] = item
+
+        return list(deduped_cookies.values()), origins
+
+    def _read_page_state(self) -> dict[str, object]:
+        page = self._require_page()
+        title = page.title()
+        url = page.url
+        body_text = (page.locator("body").inner_text(timeout=5000) or "")[:3000]
+        lowered_body = body_text.lower()
+        lowered_title = title.lower()
+        has_challenge = any(
+            marker in lowered_body or marker in lowered_title
+            for marker in [
+                "just a moment",
+                "checking your browser",
+                "verify you are human",
+                "security verification",
+                "performing security verification",
+                "cf-browser-verification",
+                "cloudflare",
+            ]
+        )
+        has_login_prompt = any(
+            marker in lowered_body
+            for marker in [
+                "sign in",
+                "log in",
+                "login",
+                "continue with x",
+            ]
+        )
+        return {
+            "title": title,
+            "url": url,
+            "body_text": body_text,
+            "has_challenge": has_challenge,
+            "has_login_prompt": has_login_prompt,
+        }
 
     def _find_prompt_input(self):
         page = self._require_page()
@@ -332,3 +460,11 @@ class GrokAutomationProvider(ProviderAutomation):
                 "Grok provider page is not initialized",
             )
         return self._page
+
+    def _require_browser_context(self):
+        if self._browser_context is None:
+            raise ProviderAutomationError(
+                "PLAYWRIGHT_NOT_BOOTSTRAPPED",
+                "Grok provider browser context is not initialized",
+            )
+        return self._browser_context
