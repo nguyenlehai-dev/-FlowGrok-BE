@@ -8,6 +8,7 @@ from app.services.playwright_runtime import (
     build_browser_init_script,
     build_browser_context_kwargs,
     build_browser_launch_kwargs,
+    get_browser_cdp_url,
     get_playwright_sync_api,
 )
 from app.worker.providers.base import (
@@ -33,6 +34,26 @@ class GrokAutomationProvider(ProviderAutomation):
         try:
             sync_playwright = get_playwright_sync_api()
             self._playwright = sync_playwright().start()
+            cdp_url = get_browser_cdp_url(self.context)
+            if cdp_url:
+                self._browser = self._playwright.chromium.connect_over_cdp(cdp_url)
+                contexts = self._browser.contexts
+                if contexts:
+                    self._browser_context = contexts[0]
+                else:
+                    self._browser_context = self._browser.new_context()
+                self._browser_context.add_init_script(build_browser_init_script(self.context))
+                pages = self._browser_context.pages
+                self._page = pages[0] if pages else self._browser_context.new_page()
+                self._boot_state = {
+                    "browser": "chromium",
+                    "headless": self.context.headless,
+                    "persistent_context": True,
+                    "cdp_connected": True,
+                    "cdp_url": cdp_url,
+                }
+                return self._boot_state
+
             launch_kwargs = build_browser_launch_kwargs(self.context)
             context_kwargs = build_browser_context_kwargs(self.context)
             storage_state_path = context_kwargs.pop("storage_state", None)
@@ -56,6 +77,7 @@ class GrokAutomationProvider(ProviderAutomation):
                 "browser": "chromium",
                 "headless": self.context.headless,
                 "persistent_context": True,
+                "cdp_connected": False,
                 "storage_state_loaded": bool(storage_state_path),
                 "browser_dir": str(browser_dir),
             }
@@ -130,7 +152,8 @@ class GrokAutomationProvider(ProviderAutomation):
     def _generate(self, mode: str) -> list[ProviderArtifact]:
         page = self._require_page()
         try:
-            self._goto_grok()
+            diagnostics = self._goto_grok()
+            self._raise_for_blocked_session(mode, diagnostics)
 
             prompt_input = self._find_prompt_input()
             if prompt_input is None:
@@ -186,6 +209,55 @@ class GrokAutomationProvider(ProviderAutomation):
                 f"Grok {mode} execution failed: {exc}",
                 artifacts=self._collect_debug_artifacts(f"grok-{mode}-failed"),
             ) from exc
+
+    def _raise_for_blocked_session(self, mode: str, diagnostics: dict[str, object]) -> None:
+        has_challenge = bool(diagnostics.get("has_challenge"))
+        has_login_prompt = bool(diagnostics.get("has_login_prompt"))
+        if not has_challenge and not has_login_prompt:
+            return
+
+        blocked_reason = "challenge" if has_challenge else "login_prompt"
+        title = str(diagnostics.get("title") or "").strip() or "Unknown page"
+        url = str(diagnostics.get("url") or "").strip() or "https://grok.com/"
+        wait_ms = int(diagnostics.get("challenge_wait_ms") or 0)
+        if has_challenge:
+            message = (
+                f"Grok browser session is blocked by a security challenge before {mode}. "
+                f"title={title!r} url={url} wait_ms={wait_ms}"
+            )
+            error_code = "CHALLENGE_BLOCKED"
+        else:
+            message = (
+                f"Grok browser session requires manual login before {mode}. "
+                f"title={title!r} url={url} wait_ms={wait_ms}"
+            )
+            error_code = "LOGIN_REQUIRED"
+
+        artifacts = self._collect_debug_artifacts(f"grok-{mode}-{blocked_reason}")
+        artifacts.append(
+            ProviderArtifact(
+                artifact_type="metadata",
+                file_name=f"grok-{mode}-{blocked_reason}.txt",
+                mime_type="text/plain",
+                text_content="\n".join([
+                    f"provider={self.provider_name}",
+                    f"mode={mode}",
+                    f"status={blocked_reason}",
+                    f"title={title}",
+                    f"url={url}",
+                    f"wait_ms={wait_ms}",
+                    f"has_challenge={has_challenge}",
+                    f"has_login_prompt={has_login_prompt}",
+                ]),
+                metadata={
+                    "provider": self.provider_name,
+                    "mode": mode,
+                    "blocked_reason": blocked_reason,
+                    "url": url,
+                },
+            )
+        )
+        raise ProviderAutomationError(error_code, message, artifacts=artifacts)
 
     def _goto_grok(self) -> dict[str, object]:
         page = self._require_page()

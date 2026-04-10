@@ -70,14 +70,34 @@ Authorization: Bearer <access_token>
 {
     "id": "uuid",
     "key": "fgk_RN3-nboYsLd1ygCZLw4dSUpcnhT9EW3eExd0XQC8EMA",
-    "status": "active"
+    "status": "active",
+    "key_preview": "fgk_RN3-nb...QC8EMA"
 }
 ```
+
+Lưu ý:
+
+- `key` chỉ trả về đầy đủ đúng **một lần** ở thời điểm tạo.
+- Backend lưu `key_hash`, không dùng plaintext key để xác thực mới.
 
 ### 4.2. Liệt kê API Keys
 ```
 GET /api/v1/auth/api-keys
 Authorization: Bearer <access_token>
+```
+
+**Response (200):**
+```json
+[
+  {
+    "id": "uuid",
+    "key": null,
+    "status": "active",
+    "key_preview": "fgk_RN3-nb...QC8EMA",
+    "rate_limit_per_minute": 60,
+    "last_used_at": null
+  }
+]
 ```
 
 ### 4.3. Thu hồi API Key

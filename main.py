@@ -1,9 +1,13 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.db.database import engine
+from app.core.logging_utils import configure_logging
+from app.core.security import get_cors_origins
+from app.db.database import engine, SQLALCHEMY_DATABASE_URL
 from app.db.base import Base
 from app.db.migrations import run_sqlite_migrations
 import app.models.core  # Import để SQLAlchemy nhận diện model và tạo bảng
+
+configure_logging()
 
 # Tạo toàn bộ các bảng vào file SQLite khi khởi động
 Base.metadata.create_all(bind=engine)
@@ -16,7 +20,7 @@ app = FastAPI(title="FlowGrok API", version="1.0.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=get_cors_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -34,3 +38,33 @@ app.include_router(jobs.external_router, prefix="/api/v1/client/jobs", tags=["Cl
 @app.get("/")
 def read_root():
     return {"status": "ok", "message": "FlowGrok FastAPI Database Mapped!"}
+
+
+@app.get("/health")
+def read_health():
+    return {
+        "status": "ok",
+        "service": "flowgrok-api",
+        "database": {
+            "dialect": engine.dialect.name,
+            "url": _mask_database_url(SQLALCHEMY_DATABASE_URL),
+        },
+    }
+
+
+@app.get("/api/health")
+def read_api_health():
+    return read_health()
+
+
+def _mask_database_url(database_url: str) -> str:
+    if "://" not in database_url:
+        return database_url
+    scheme, rest = database_url.split("://", 1)
+    if "@" not in rest:
+        return database_url
+    credentials, host_part = rest.split("@", 1)
+    if ":" not in credentials:
+        return f"{scheme}://***@{host_part}"
+    username, _password = credentials.split(":", 1)
+    return f"{scheme}://{username}:***@{host_part}"

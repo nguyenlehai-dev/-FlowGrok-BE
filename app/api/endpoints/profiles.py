@@ -28,7 +28,9 @@ external_router = APIRouter()
 @router.post("/", response_model=ProfileResponse)
 def create_profile(profile: ProfileCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     directories = ensure_profile_directories("tmp")
-    db_profile = Profile(**profile.model_dump(exclude={"user_id"}), user_id=current_user.id)
+    payload = profile.model_dump(exclude={"user_id"})
+    payload["headless"] = True
+    db_profile = Profile(**payload, user_id=current_user.id)
     db.add(db_profile)
     db.commit()
     db.refresh(db_profile)
@@ -78,7 +80,10 @@ def update_profile(profile_id: str, payload: ProfileUpdate, current_user: User =
     if not profile:
         raise HTTPException(status_code=404, detail="Profile not found")
     for key, value in payload.model_dump(exclude_unset=True).items():
+        if key == "headless":
+            value = True
         setattr(profile, key, value)
+    profile.headless = True
     db.commit()
     db.refresh(profile)
     return profile
@@ -107,9 +112,12 @@ def upsert_runtime_settings(profile_id: str, payload: ProfileRuntimeSettingsUpse
     if not runtime:
         runtime = ProfileRuntimeSettings(profile_id=profile.id)
         db.add(runtime)
-    for key, value in payload.model_dump().items():
+    runtime_payload = payload.model_dump()
+    runtime_payload["headless"] = True
+    for key, value in runtime_payload.items():
         setattr(runtime, key, value)
-    profile.headless = runtime.headless
+    runtime.headless = True
+    profile.headless = True
     profile.concurrency_limit = runtime.concurrency_limit
     db.commit()
     db.refresh(runtime)

@@ -4,7 +4,12 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from app.db.database import get_db
-from app.core.security import verify_password, get_password_hash, create_access_token
+from app.core.security import (
+    verify_password,
+    get_password_hash,
+    create_access_token,
+    hash_api_key,
+)
 from app.core.deps import get_current_user
 from app.models.core import User, ApiKey
 
@@ -34,7 +39,7 @@ class UserResponse(BaseModel):
 
 class ApiKeyResponse(BaseModel):
     id: str
-    key: str
+    key: str | None = None
     status: str
     name: str | None = None
     key_preview: str | None = None
@@ -87,18 +92,43 @@ def get_me(current_user: User = Depends(get_current_user)):
 def create_api_key(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """Sinh một API Key mới cho user hiện tại."""
     key = f"fgk_{secrets.token_urlsafe(32)}"
-    api_key = ApiKey(user_id=current_user.id, key=key, key_preview=f"{key[:10]}...{key[-6:]}")
+    preview = f"{key[:10]}...{key[-6:]}"
+    api_key = ApiKey(
+        user_id=current_user.id,
+        key=f"stored_{secrets.token_urlsafe(12)}",
+        key_preview=preview,
+        key_hash=hash_api_key(key),
+    )
     db.add(api_key)
     db.commit()
     db.refresh(api_key)
-    return api_key
+    return ApiKeyResponse(
+        id=api_key.id,
+        key=key,
+        status=api_key.status,
+        name=api_key.name,
+        key_preview=preview,
+        rate_limit_per_minute=api_key.rate_limit_per_minute,
+        last_used_at=api_key.last_used_at,
+    )
 
 
 @router.get("/api-keys", response_model=list[ApiKeyResponse])
 def list_api_keys(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """Liệt kê tất cả API Keys của user hiện tại."""
     keys = db.query(ApiKey).filter(ApiKey.user_id == current_user.id).all()
-    return keys
+    return [
+        ApiKeyResponse(
+            id=item.id,
+            key=None,
+            status=item.status,
+            name=item.name,
+            key_preview=item.key_preview,
+            rate_limit_per_minute=item.rate_limit_per_minute,
+            last_used_at=item.last_used_at,
+        )
+        for item in keys
+    ]
 
 
 @router.delete("/api-keys/{key_id}")

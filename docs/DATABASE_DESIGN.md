@@ -1,6 +1,11 @@
 # Sơ đồ thiết kế cơ sở dữ liệu (FlowGrok)
 
-Hệ thống sử dụng **SQLAlchemy** làm ORM, kết nối tới **SQLite** (file `flowgrok.db`). Tất cả model nằm tại `app/models/core.py`.
+Hệ thống sử dụng **SQLAlchemy** làm ORM.
+
+- Local/dev mặc định dùng **SQLite** qua file `flowgrok.db`
+- Online/staging/prod có thể cấu hình qua biến môi trường `DATABASE_URL` để chạy với **PostgreSQL / Supabase**
+
+Tất cả model nằm tại `app/models/core.py`.
 
 ## 1. Bảng `users`
 | Cột | Kiểu | Ghi chú |

@@ -1,9 +1,9 @@
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from app.core.deps import ApiClientContext, get_api_client_context, get_current_user
+from app.core.deps import ApiClientContext, get_api_client_context, get_current_user, require_internal_worker
 from app.db.database import get_db
 from app.models.core import Job, JobArtifact, Profile, User
 from app.schemas.core import JobCreate, JobResponse, JobArtifactResponse
@@ -107,6 +107,24 @@ def list_job_artifacts(job_id: str, current_user: User = Depends(get_current_use
     return db.query(JobArtifact).filter(JobArtifact.job_id == job.id).all()
 
 
+@router.post("/run-worker-once", response_model=InternalWorkerRunOnceResponse)
+def run_worker_once_for_dashboard(
+    payload: InternalWorkerRunOnceRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    runner = JobRunner(
+        WorkerRuntimeConfig(
+            worker_id=payload.worker_id,
+            max_concurrency=1,
+            headless=True,
+            max_priority=payload.max_priority,
+        )
+    )
+    result = runner.run_once(db)
+    return InternalWorkerRunOnceResponse(**result)
+
+
 @external_router.post("/", response_model=JobResponse)
 def create_client_job(
     payload: JobCreate,
@@ -196,7 +214,11 @@ def list_client_job_artifacts(
 
 
 @internal_router.post("/claim", response_model=JobResponse | None)
-def claim_next_job(payload: InternalJobClaimRequest, x_worker_token: str | None = Header(default=None), db: Session = Depends(get_db)):
+def claim_next_job(
+    payload: InternalJobClaimRequest,
+    _worker_token: str = Depends(require_internal_worker),
+    db: Session = Depends(get_db),
+):
     query = db.query(Job).filter(Job.status == "queued", Job.priority <= payload.max_priority).order_by(Job.priority.asc(), Job.created_at.asc())
     job = query.first()
     if not job:
@@ -210,7 +232,12 @@ def claim_next_job(payload: InternalJobClaimRequest, x_worker_token: str | None 
 
 
 @internal_router.post("/{job_id}/heartbeat")
-def job_heartbeat(job_id: str, payload: InternalWorkerHeartbeat, x_worker_token: str | None = Header(default=None), db: Session = Depends(get_db)):
+def job_heartbeat(
+    job_id: str,
+    payload: InternalWorkerHeartbeat,
+    _worker_token: str = Depends(require_internal_worker),
+    db: Session = Depends(get_db),
+):
     job = db.query(Job).filter(Job.id == job_id).first()
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -222,7 +249,12 @@ def job_heartbeat(job_id: str, payload: InternalWorkerHeartbeat, x_worker_token:
 
 
 @internal_router.post("/{job_id}/status", response_model=JobResponse)
-def update_job_status(job_id: str, payload: InternalJobStatusUpdate, x_worker_token: str | None = Header(default=None), db: Session = Depends(get_db)):
+def update_job_status(
+    job_id: str,
+    payload: InternalJobStatusUpdate,
+    _worker_token: str = Depends(require_internal_worker),
+    db: Session = Depends(get_db),
+):
     job = db.query(Job).filter(Job.id == job_id).first()
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -244,7 +276,12 @@ def update_job_status(job_id: str, payload: InternalJobStatusUpdate, x_worker_to
 
 
 @internal_router.post("/{job_id}/artifacts", response_model=JobArtifactResponse)
-def register_job_artifact(job_id: str, payload: InternalJobArtifactCreate, x_worker_token: str | None = Header(default=None), db: Session = Depends(get_db)):
+def register_job_artifact(
+    job_id: str,
+    payload: InternalJobArtifactCreate,
+    _worker_token: str = Depends(require_internal_worker),
+    db: Session = Depends(get_db),
+):
     job = db.query(Job).filter(Job.id == job_id).first()
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -268,7 +305,7 @@ def register_job_artifact(job_id: str, payload: InternalJobArtifactCreate, x_wor
 @internal_router.post("/run-once", response_model=InternalWorkerRunOnceResponse)
 def worker_run_once(
     payload: InternalWorkerRunOnceRequest,
-    x_worker_token: str | None = Header(default=None),
+    _worker_token: str = Depends(require_internal_worker),
     db: Session = Depends(get_db),
 ):
     runner = JobRunner(

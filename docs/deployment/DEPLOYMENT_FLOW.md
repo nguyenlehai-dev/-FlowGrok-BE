@@ -21,6 +21,7 @@ Production API entrypoint from frontend:
   - `/home/vpsroot/projects/backend/-FlowGrok-BE/flowgrok.db`
   - `/home/vpsroot/projects/backend/-FlowGrok-BE/storage/`
 - Redis chạy cùng stack qua `docker-compose.yml`
+- Có thể bật thêm local PostgreSQL qua compose profile `postgres`
 
 ## Current State
 
@@ -90,6 +91,21 @@ cd /home/vpsroot/projects/backend/-FlowGrok-BE
 ./scripts/deploy-compose.sh staging
 ```
 
+Backup + migrate SQLite -> Postgres + verify:
+
+```bash
+cd /home/vpsroot/projects/backend/-FlowGrok-BE
+TARGET_DATABASE_URL=postgresql+psycopg://postgres:password@localhost:5432/flowgrok \
+./scripts/backup_migrate_verify.sh
+```
+
+Switch local runtime sang Docker Postgres:
+
+```bash
+cd /home/vpsroot/projects/backend/-FlowGrok-BE
+./scripts/switch_to_local_postgres.sh
+```
+
 ## Runtime Config
 
 - Source path:
@@ -102,6 +118,8 @@ cd /home/vpsroot/projects/backend/-FlowGrok-BE
   - `/home/vpsroot/projects/backend/-FlowGrok-BE/scripts/promote-branch.sh`
 - Deploy script:
   - `/home/vpsroot/projects/backend/-FlowGrok-BE/scripts/deploy-compose.sh`
+- DB migration guide:
+  - `/home/vpsroot/projects/backend/-FlowGrok-BE/docs/deployment/DATABASE_MIGRATION.md`
 - Branch bootstrap guide:
   - `/home/vpsroot/projects/backend/-FlowGrok-BE/docs/deployment/BRANCHING_SETUP.md`
 - API runtime command:
@@ -110,8 +128,11 @@ cd /home/vpsroot/projects/backend/-FlowGrok-BE
   - `8080`
 - Redis port:
   - `6380`
+- Local Postgres port khi bật profile:
+  - `5433`
 - Database hiện tại:
-  - SQLite file `flowgrok.db`
+  - Local default: SQLite file `flowgrok.db`
+  - Online ready: PostgreSQL / Supabase via `DATABASE_URL`
 - Persistent runtime files:
   - `storage/`
 

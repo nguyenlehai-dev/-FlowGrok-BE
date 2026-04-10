@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from app.worker.providers.base import ProviderExecutionContext
+if TYPE_CHECKING:
+    from app.worker.providers.base import ProviderExecutionContext
 
 
 DEFAULT_USER_AGENT = (
@@ -63,7 +65,7 @@ def _merge_launch_args(runtime_args: list[str]) -> list[str]:
     return merged
 
 
-def build_browser_launch_kwargs(context: ProviderExecutionContext) -> dict[str, Any]:
+def build_browser_launch_kwargs(context: "ProviderExecutionContext") -> dict[str, Any]:
     runtime_settings = context.runtime_settings or {}
     launch_args = runtime_settings.get("launch_args") or []
     if not isinstance(launch_args, list):
@@ -79,7 +81,16 @@ def build_browser_launch_kwargs(context: ProviderExecutionContext) -> dict[str, 
     return launch_kwargs
 
 
-def build_browser_context_kwargs(context: ProviderExecutionContext) -> dict[str, Any]:
+def get_browser_cdp_url(context: "ProviderExecutionContext") -> str | None:
+    runtime_settings = context.runtime_settings or {}
+    configured = runtime_settings.get("cdp_url")
+    if configured:
+        return str(configured).strip() or None
+    env_value = os.getenv("PLAYWRIGHT_CDP_URL", "").strip()
+    return env_value or None
+
+
+def build_browser_context_kwargs(context: "ProviderExecutionContext") -> dict[str, Any]:
     runtime_settings = context.runtime_settings or {}
     antidetect_settings = context.antidetect_settings or {}
     viewport_width = _coerce_int(antidetect_settings.get("viewport_width"), 1366)
@@ -125,7 +136,7 @@ def build_browser_context_kwargs(context: ProviderExecutionContext) -> dict[str,
     return {key: value for key, value in context_kwargs.items() if value is not None}
 
 
-def build_browser_init_script(context: ProviderExecutionContext) -> str:
+def build_browser_init_script(context: "ProviderExecutionContext") -> str:
     antidetect_settings = context.antidetect_settings or {}
     locale = str(antidetect_settings.get("locale") or "en-US")
     language = locale.split("-")[0]

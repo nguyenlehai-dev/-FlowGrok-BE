@@ -1,6 +1,8 @@
 services:
   api:
     build: .
+    env_file:
+      - .env
     ports:
       - "8080:8000"
     volumes:
@@ -9,7 +11,26 @@ services:
       - redis
     command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
     environment:
+      - DATABASE_URL=${DATABASE_URL:-sqlite:///./flowgrok.db}
       - REDIS_URL=redis://redis:6379/0
+
+  postgres:
+    image: postgres:16-alpine
+    profiles:
+      - postgres
+    ports:
+      - "5433:5432"
+    environment:
+      - POSTGRES_DB=${POSTGRES_DB:-flowgrok}
+      - POSTGRES_USER=${POSTGRES_USER:-flowgrok}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-flowgrok_dev_password}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-flowgrok} -d ${POSTGRES_DB:-flowgrok}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   redis:
     image: redis:alpine
@@ -19,4 +40,5 @@ services:
       - redis_data:/data
 
 volumes:
+  postgres_data:
   redis_data:
