@@ -70,9 +70,12 @@ def build_browser_launch_kwargs(context: "ProviderExecutionContext") -> dict[str
     launch_args = runtime_settings.get("launch_args") or []
     if not isinstance(launch_args, list):
         launch_args = []
+    headless = context.headless
+    if not headless and os.name != "nt" and not os.getenv("DISPLAY"):
+        headless = True
 
     launch_kwargs: dict[str, Any] = {
-        "headless": context.headless,
+        "headless": headless,
         "args": _merge_launch_args([str(item) for item in launch_args]),
     }
     channel = runtime_settings.get("channel")
