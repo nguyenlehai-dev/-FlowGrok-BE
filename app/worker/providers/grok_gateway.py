@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import base64
+import json
 import os
 from pathlib import Path
 from typing import Any
-
-import httpx
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 from app.worker.providers.base import ProviderArtifact, ProviderAutomation, ProviderAutomationError
 
@@ -57,25 +58,21 @@ class GrokGatewayProvider(ProviderAutomation):
             "request_payload": self.context.request_payload or {},
         }
         try:
-            response = httpx.post(
+            response_body, content_type = _post_json(
                 endpoint,
-                headers={
+                payload,
+                {
                     "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
                 },
-                json=payload,
-                timeout=300,
             )
-            response.raise_for_status()
         except Exception as exc:
             raise ProviderAutomationError(
                 "GATEWAY_REQUEST_FAILED",
                 f"Grok gateway request failed: {exc}",
             ) from exc
 
-        content_type = response.headers.get("content-type", "")
         if content_type.startswith("application/json"):
-            return self._artifacts_from_json(mode, response.json())
+            return self._artifacts_from_json(mode, json.loads(response_body.decode("utf-8")))
 
         artifact_type = "video" if mode == "generate_video" else "image"
         extension = ".mp4" if mode == "generate_video" else ".bin"
@@ -84,7 +81,7 @@ class GrokGatewayProvider(ProviderAutomation):
                 artifact_type=artifact_type,
                 file_name=f"grok-gateway-{mode}{extension}",
                 mime_type=content_type or "application/octet-stream",
-                binary_content=response.content,
+                binary_content=response_body,
                 metadata={"provider": self.provider_name, "mode": mode},
             )
         ]
@@ -95,7 +92,7 @@ class GrokGatewayProvider(ProviderAutomation):
                 artifact_type="metadata",
                 file_name=f"grok-gateway-{mode}.json",
                 mime_type="application/json",
-                text_content=httpx.Response(200, json=data).text,
+                text_content=json.dumps(data, ensure_ascii=False, indent=2),
                 metadata={"provider": self.provider_name, "mode": mode},
             )
         ]
@@ -103,21 +100,19 @@ class GrokGatewayProvider(ProviderAutomation):
         result_url = data.get("result_url") or data.get("url")
         if isinstance(result_url, str) and result_url:
             try:
-                media_response = httpx.get(result_url, timeout=300)
-                media_response.raise_for_status()
+                media_content, mime_type = _get_binary(result_url)
             except Exception as exc:
                 raise ProviderAutomationError(
                     "GATEWAY_RESULT_DOWNLOAD_FAILED",
                     f"Grok gateway result download failed: {exc}",
                     artifacts=artifacts,
                 ) from exc
-            mime_type = media_response.headers.get("content-type", "application/octet-stream")
             artifacts.append(
                 ProviderArtifact(
                     artifact_type="video" if mode == "generate_video" else "image",
                     file_name=f"grok-gateway-{mode}{_extension_for_mime(mime_type)}",
                     mime_type=mime_type,
-                    binary_content=media_response.content,
+                    binary_content=media_content,
                     metadata={"provider": self.provider_name, "mode": mode, "result_url": result_url},
                 )
             )
@@ -168,3 +163,33 @@ def _extension_for_mime(mime_type: str) -> str:
     if "webp" in mime_type:
         return ".webp"
     return ".bin"
+
+
+def _post_json(url: str, payload: dict[str, Any], headers: dict[str, str]) -> tuple[bytes, str]:
+    request = Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            **headers,
+            "Content-Type": "application/json",
+            "Accept": "application/json, image/*, video/*, application/octet-stream",
+        },
+        method="POST",
+    )
+    return _open_request(request)
+
+
+def _get_binary(url: str) -> tuple[bytes, str]:
+    request = Request(url, method="GET")
+    return _open_request(request)
+
+
+def _open_request(request: Request) -> tuple[bytes, str]:
+    try:
+        with urlopen(request, timeout=300) as response:  # noqa: S310 - configured gateway endpoint
+            return response.read(), response.headers.get("content-type", "application/octet-stream")
+    except HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"HTTP {exc.code}: {body[:500]}") from exc
+    except URLError as exc:
+        raise RuntimeError(str(exc)) from exc
