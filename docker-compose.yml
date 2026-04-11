@@ -14,6 +14,22 @@ services:
       - DATABASE_URL=${DATABASE_URL:-sqlite:///./flowgrok.db}
       - REDIS_URL=redis://redis:6379/0
 
+  local-agent-test:
+    image: flowgrok-be-api
+    profiles:
+      - local-agent-test
+    env_file:
+      - .env
+    ports:
+      - "127.0.0.1:8765:8765"
+    volumes:
+      - .:/app
+    command: uvicorn app.local_agent.main:app --host 0.0.0.0 --port 8765
+    environment:
+      - FLOWGROK_LOCAL_PROFILE_ID=${FLOWGROK_LOCAL_PROFILE_ID:-test-local-grok}
+      - FLOWGROK_LOCAL_PROFILE_NAME=${FLOWGROK_LOCAL_PROFILE_NAME:-Test Local Grok}
+      - FLOWGROK_LOCAL_API_KEY=${FLOWGROK_LOCAL_API_KEY:-}
+
   postgres:
     image: postgres:16-alpine
     profiles:

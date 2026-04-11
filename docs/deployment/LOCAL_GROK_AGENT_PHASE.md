@@ -30,6 +30,28 @@ playwright install chromium
 HOST=127.0.0.1 PORT=8765 ./scripts/run-local-agent.sh
 ```
 
+## Run Test Service
+
+On the shared test server, run the local agent as a separate compose profile so the main API service is not restarted:
+
+```bash
+docker compose --profile local-agent-test up -d local-agent-test
+```
+
+The test nginx route is:
+
+```text
+https://testflowgrok.plxeditor.com/local-agent/
+```
+
+Examples:
+
+```bash
+curl https://testflowgrok.plxeditor.com/local-agent/health
+curl -H "X-API-Key: $FLOWGROK_LOCAL_API_KEY" \
+  https://testflowgrok.plxeditor.com/local-agent/api/v1/jobs
+```
+
 For a published API, set an API key first:
 
 ```bash
