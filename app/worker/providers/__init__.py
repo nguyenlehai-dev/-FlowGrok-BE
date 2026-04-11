@@ -12,5 +12,6 @@ def get_provider_automation(context: ProviderExecutionContext) -> ProviderAutoma
         "flow": FlowAutomationProvider,
         "dreamina": DreaminaAutomationProvider,
     }
-    provider_class = provider_map.get(context.provider, GrokAutomationProvider)
+    provider_key = str(context.provider or "").strip().lower()
+    provider_class = provider_map.get(provider_key, GrokAutomationProvider)
     return provider_class(context)

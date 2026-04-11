@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import json
+from mimetypes import guess_type
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
+
+from fastapi import UploadFile
 
 from app.services.profile_storage import BASE_STORAGE_DIR
 
@@ -11,14 +15,17 @@ def ensure_job_directories(job_id: str) -> dict[str, str]:
     job_root = BASE_STORAGE_DIR / "jobs" / job_id
     artifacts_dir = job_root / "artifacts"
     logs_dir = job_root / "logs"
+    uploads_dir = job_root / "uploads"
 
     artifacts_dir.mkdir(parents=True, exist_ok=True)
     logs_dir.mkdir(parents=True, exist_ok=True)
+    uploads_dir.mkdir(parents=True, exist_ok=True)
 
     return {
         "root": str(job_root),
         "artifacts": str(artifacts_dir),
         "logs": str(logs_dir),
+        "uploads": str(uploads_dir),
     }
 
 
@@ -48,3 +55,18 @@ def write_job_binary_artifact(job_id: str, file_name: str, content: bytes) -> st
     target_path = Path(directories["artifacts"]) / file_name
     target_path.write_bytes(content)
     return str(target_path)
+
+
+async def save_job_upload(job_id: str, upload: UploadFile) -> dict[str, Any]:
+    directories = ensure_job_directories(job_id)
+    extension = Path(upload.filename or "source-image.bin").suffix or ".bin"
+    target_path = Path(directories["uploads"]) / f"{uuid4().hex}{extension}"
+    content = await upload.read()
+    target_path.write_bytes(content)
+    mime_type, _ = guess_type(target_path.name)
+    return {
+        "file_path": str(target_path),
+        "file_name": upload.filename or target_path.name,
+        "mime_type": mime_type or "application/octet-stream",
+        "size_bytes": len(content),
+    }

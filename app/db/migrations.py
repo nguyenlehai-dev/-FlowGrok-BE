@@ -43,6 +43,9 @@ TABLE_COLUMN_UPDATES: dict[str, list[tuple[str, str]]] = {
         ("is_enabled", "BOOLEAN DEFAULT 1"),
         ("updated_at", "DATETIME"),
     ],
+    "profile_runtime_settings": [
+        ("cdp_url", "VARCHAR"),
+    ],
     "generation_jobs": [
         ("requested_by_user_id", "VARCHAR"),
         ("api_key_id", "VARCHAR"),

@@ -108,6 +108,7 @@ class ProfileRuntimeSettings(Base):
     profile_id = Column(String, ForeignKey("profiles.id", name="fk_runtime_profile_id"), unique=True, nullable=False)
     browser_type = Column(String, default="chromium")
     channel = Column(String, nullable=True)
+    cdp_url = Column(String, nullable=True)
     headless = Column(Boolean, default=True)
     timeout_ms = Column(Integer, default=120000)
     navigation_timeout_ms = Column(Integer, default=60000)

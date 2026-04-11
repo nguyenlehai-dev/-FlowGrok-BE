@@ -1,5 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from dotenv import load_dotenv
 from app.core.logging_utils import configure_logging
 from app.core.security import get_cors_origins
 from app.db.database import engine, SQLALCHEMY_DATABASE_URL
@@ -7,6 +8,7 @@ from app.db.base import Base
 from app.db.migrations import run_sqlite_migrations
 import app.models.core  # Import để SQLAlchemy nhận diện model và tạo bảng
 
+load_dotenv()
 configure_logging()
 
 # Tạo toàn bộ các bảng vào file SQLite khi khởi động

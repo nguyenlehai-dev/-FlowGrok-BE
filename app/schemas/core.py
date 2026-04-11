@@ -87,6 +87,7 @@ class ProfileResponse(ProfileBase):
 class ProfileRuntimeSettingsBase(BaseModel):
     browser_type: str = "chromium"
     channel: Optional[str] = None
+    cdp_url: Optional[str] = None
     headless: bool = True
     timeout_ms: int = 120000
     navigation_timeout_ms: int = 60000
@@ -158,6 +159,15 @@ class JobCreate(BaseModel):
     profile_id: str
     job_type: Literal["generate_image", "generate_video"]
     prompt: str
+    # request_payload for generate_video supports:
+    # {
+    #   "video_resolution": "480p" | "720p",   (optional, default: 480p)
+    #   "video_duration": "6s" | "10s",        (optional, default: 6s)
+    #   "source_image": {                      (optional, set automatically by upload endpoint)
+    #     "file_path": "/abs/path/to/image",
+    #     "mime_type": "image/png"
+    #   }
+    # }
     request_payload: Optional[Any] = None
     priority: int = 100
 

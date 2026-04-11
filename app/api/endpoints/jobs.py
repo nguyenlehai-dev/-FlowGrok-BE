@@ -1,12 +1,16 @@
+import json
 from datetime import datetime, timezone
+from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from app.core.deps import ApiClientContext, get_api_client_context, get_current_user, require_internal_worker
 from app.db.database import get_db
 from app.models.core import Job, JobArtifact, Profile, User
 from app.schemas.core import JobCreate, JobResponse, JobArtifactResponse
+from app.services.job_storage import save_job_upload
 from app.schemas.jobs_internal import (
     InternalJobArtifactCreate,
     InternalJobClaimRequest,
@@ -50,6 +54,68 @@ def create_job(payload: JobCreate, current_user: User = Depends(get_current_user
         browser_session_path=profile.storage_path,
     )
     db.add(job)
+    db.commit()
+    db.refresh(job)
+    return job
+
+
+@router.post("/with-source-image", response_model=JobResponse)
+async def create_job_with_source_image(
+    profile_id: str = Form(...),
+    job_type: str = Form(...),
+    prompt: str = Form(""),
+    priority: int = Form(100),
+    request_payload: str | None = Form(None),
+    source_image: UploadFile = File(...),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if job_type not in {"generate_image", "generate_video"}:
+        raise HTTPException(status_code=400, detail="Unsupported job type")
+
+    profile = db.query(Profile).filter(Profile.id == profile_id).first()
+    if not profile:
+        raise HTTPException(status_code=404, detail="Profile not found")
+    if not profile.is_enabled:
+        raise HTTPException(status_code=400, detail="Profile is disabled")
+
+    running_count = db.query(Job).filter(
+        Job.profile_id == profile.id,
+        Job.status.in_(["queued", "reserved", "booting_browser", "logging_in", "running"])
+    ).count()
+    if running_count >= (profile.concurrency_limit or 1):
+        raise HTTPException(status_code=400, detail="Profile concurrency limit reached")
+
+    parsed_request_payload: dict[str, object] = {}
+    if request_payload:
+        try:
+            raw_payload = json.loads(request_payload)
+        except json.JSONDecodeError as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid request_payload JSON: {exc.msg}") from exc
+        if not isinstance(raw_payload, dict):
+            raise HTTPException(status_code=400, detail="request_payload must decode to an object")
+        parsed_request_payload = raw_payload
+
+    job = Job(
+        requested_by_user_id=current_user.id,
+        profile_id=profile.id,
+        prompt=prompt or "",
+        category=profile.category,
+        provider=profile.category,
+        job_type=job_type,
+        request_payload=parsed_request_payload,
+        priority=priority,
+        status="queued",
+        browser_session_path=profile.storage_path,
+    )
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+
+    upload_info = await save_job_upload(job.id, source_image)
+    request_payload_data = dict(parsed_request_payload)
+    request_payload_data["source_image"] = upload_info
+    job.request_payload = request_payload_data
     db.commit()
     db.refresh(job)
     return job
@@ -104,7 +170,24 @@ def list_job_artifacts(job_id: str, current_user: User = Depends(get_current_use
     job = db.query(Job).filter(Job.id == job_id, Job.requested_by_user_id == current_user.id).first()
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    return db.query(JobArtifact).filter(JobArtifact.job_id == job.id).all()
+    artifacts = db.query(JobArtifact).filter(JobArtifact.job_id == job.id).all()
+    return [artifact for artifact in artifacts if _artifact_is_publishable(artifact)]
+
+
+@router.get("/{job_id}/artifacts/{artifact_id}/content")
+def get_job_artifact_content(job_id: str, artifact_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    artifact = _find_user_job_artifact(db, job_id, artifact_id, current_user.id)
+    if not _artifact_is_publishable(artifact):
+        raise HTTPException(status_code=404, detail="Artifact file not available")
+    file_path = Path(artifact.file_path)
+    if not file_path.exists() or not file_path.is_file():
+        raise HTTPException(status_code=404, detail="Artifact file not found")
+    return FileResponse(
+        path=file_path,
+        media_type=artifact.mime_type or "application/octet-stream",
+        filename=file_path.name,
+        content_disposition_type="inline",
+    )
 
 
 @router.post("/run-worker-once", response_model=InternalWorkerRunOnceResponse)
@@ -210,7 +293,29 @@ def list_client_job_artifacts(
     job = db.query(Job).filter(Job.id == job_id, Job.requested_by_user_id == client.user.id).first()
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    return db.query(JobArtifact).filter(JobArtifact.job_id == job.id).all()
+    artifacts = db.query(JobArtifact).filter(JobArtifact.job_id == job.id).all()
+    return [artifact for artifact in artifacts if _artifact_is_publishable(artifact)]
+
+
+@external_router.get("/{job_id}/artifacts/{artifact_id}/content")
+def get_client_job_artifact_content(
+    job_id: str,
+    artifact_id: str,
+    client: ApiClientContext = Depends(get_api_client_context),
+    db: Session = Depends(get_db),
+):
+    artifact = _find_user_job_artifact(db, job_id, artifact_id, client.user.id)
+    if not _artifact_is_publishable(artifact):
+        raise HTTPException(status_code=404, detail="Artifact file not available")
+    file_path = Path(artifact.file_path)
+    if not file_path.exists() or not file_path.is_file():
+        raise HTTPException(status_code=404, detail="Artifact file not found")
+    return FileResponse(
+        path=file_path,
+        media_type=artifact.mime_type or "application/octet-stream",
+        filename=file_path.name,
+        content_disposition_type="inline",
+    )
 
 
 @internal_router.post("/claim", response_model=JobResponse | None)
@@ -318,3 +423,35 @@ def worker_run_once(
     )
     result = runner.run_once(db)
     return InternalWorkerRunOnceResponse(**result)
+
+
+def _find_user_job_artifact(db: Session, job_id: str, artifact_id: str, user_id: str) -> JobArtifact:
+    artifact = (
+        db.query(JobArtifact)
+        .join(Job, JobArtifact.job_id == Job.id)
+        .filter(
+            JobArtifact.id == artifact_id,
+            Job.id == job_id,
+            Job.requested_by_user_id == user_id,
+        )
+        .first()
+    )
+    if not artifact:
+        raise HTTPException(status_code=404, detail="Artifact not found")
+    return artifact
+
+
+def _artifact_is_publishable(artifact: JobArtifact) -> bool:
+    file_path = Path(artifact.file_path)
+    if not file_path.exists() or not file_path.is_file():
+        return False
+    mime_type = str(artifact.mime_type or "").lower()
+    if artifact.artifact_type != "video" and not mime_type.startswith("video/"):
+        return True
+    try:
+        head = file_path.read_bytes()[:64]
+    except Exception:
+        return False
+    if head.startswith(b"<!DOCTYPE html") or head.startswith(b"<html"):
+        return False
+    return b"ftyp" in head
