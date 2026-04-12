@@ -1,9 +1,11 @@
 import json
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.core.deps import ApiClientContext, get_api_client_context, get_current_user, require_internal_worker
@@ -24,6 +26,21 @@ from app.worker.job_runner import JobRunner, WorkerRuntimeConfig
 router = APIRouter()
 internal_router = APIRouter()
 external_router = APIRouter()
+gateway_router = APIRouter()
+
+ACTIVE_JOB_STATUSES = ["queued", "reserved", "booting_browser", "logging_in", "running", "uploading_result"]
+
+
+class GatewayGenerateRequest(BaseModel):
+    provider: Literal["grok", "flow", "dreamina"] = "grok"
+    type: Literal["image", "video"] | None = None
+    job_type: Literal["generate_image", "generate_video"] | None = None
+    prompt: str = Field(..., min_length=1)
+    options: dict[str, Any] | None = None
+    request_payload: dict[str, Any] | None = None
+    resolution: Literal["480p", "720p"] | None = None
+    duration: Literal["6s", "10s"] | None = None
+    priority: int = 100
 
 
 @router.post("/", response_model=JobResponse)
@@ -249,6 +266,86 @@ def create_client_job(
     return job
 
 
+@gateway_router.post("/generate", response_model=JobResponse)
+def gateway_generate(
+    payload: GatewayGenerateRequest,
+    client: ApiClientContext = Depends(get_api_client_context),
+    db: Session = Depends(get_db),
+):
+    job_type = _resolve_gateway_job_type(payload)
+    profile = _select_available_gateway_profile(db, client.user.id, payload.provider)
+    if profile is None:
+        raise HTTPException(
+            status_code=409,
+            detail=f"No available {payload.provider} profile on the gateway server",
+        )
+
+    request_payload = _build_gateway_request_payload(payload)
+    job = Job(
+        requested_by_user_id=client.user.id,
+        api_key_id=client.api_key.id,
+        profile_id=profile.id,
+        prompt=payload.prompt.strip(),
+        category=profile.category,
+        provider=profile.category,
+        job_type=job_type,
+        request_payload=request_payload,
+        priority=payload.priority,
+        status="queued",
+        browser_session_path=profile.storage_path,
+    )
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+    return job
+
+
+@gateway_router.get("/jobs/{job_id}", response_model=JobResponse)
+def gateway_get_job(
+    job_id: str,
+    client: ApiClientContext = Depends(get_api_client_context),
+    db: Session = Depends(get_db),
+):
+    job = db.query(Job).filter(Job.id == job_id, Job.requested_by_user_id == client.user.id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return job
+
+
+@gateway_router.get("/jobs/{job_id}/artifacts", response_model=list[JobArtifactResponse])
+def gateway_list_job_artifacts(
+    job_id: str,
+    client: ApiClientContext = Depends(get_api_client_context),
+    db: Session = Depends(get_db),
+):
+    job = db.query(Job).filter(Job.id == job_id, Job.requested_by_user_id == client.user.id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    artifacts = db.query(JobArtifact).filter(JobArtifact.job_id == job.id).all()
+    return [artifact for artifact in artifacts if _artifact_is_publishable(artifact)]
+
+
+@gateway_router.get("/jobs/{job_id}/artifacts/{artifact_id}/content")
+def gateway_get_job_artifact_content(
+    job_id: str,
+    artifact_id: str,
+    client: ApiClientContext = Depends(get_api_client_context),
+    db: Session = Depends(get_db),
+):
+    artifact = _find_user_job_artifact(db, job_id, artifact_id, client.user.id)
+    if not _artifact_is_publishable(artifact):
+        raise HTTPException(status_code=404, detail="Artifact file not available")
+    file_path = Path(artifact.file_path)
+    if not file_path.exists() or not file_path.is_file():
+        raise HTTPException(status_code=404, detail="Artifact file not found")
+    return FileResponse(
+        path=file_path,
+        media_type=artifact.mime_type or "application/octet-stream",
+        filename=file_path.name,
+        content_disposition_type="inline",
+    )
+
+
 @external_router.get("/", response_model=list[JobResponse])
 def list_client_jobs(
     status: str | None = None,
@@ -439,6 +536,48 @@ def _find_user_job_artifact(db: Session, job_id: str, artifact_id: str, user_id:
     if not artifact:
         raise HTTPException(status_code=404, detail="Artifact not found")
     return artifact
+
+
+def _resolve_gateway_job_type(payload: GatewayGenerateRequest) -> str:
+    if payload.job_type:
+        return payload.job_type
+    if payload.type == "video":
+        return "generate_video"
+    return "generate_image"
+
+
+def _build_gateway_request_payload(payload: GatewayGenerateRequest) -> dict[str, Any]:
+    request_payload = dict(payload.request_payload or payload.options or {})
+    if payload.resolution:
+        request_payload["video_resolution"] = payload.resolution
+    if payload.duration:
+        request_payload["video_duration"] = payload.duration
+    request_payload["gateway"] = {
+        "provider": payload.provider,
+        "type": payload.type or ("video" if payload.job_type == "generate_video" else "image"),
+    }
+    return request_payload
+
+
+def _select_available_gateway_profile(db: Session, user_id: str, provider: str) -> Profile | None:
+    profiles = (
+        db.query(Profile)
+        .filter(
+            Profile.user_id == user_id,
+            Profile.category == provider,
+            Profile.is_enabled.is_(True),
+        )
+        .order_by(Profile.last_used_at.is_(None).desc(), Profile.last_used_at.asc(), Profile.created_at.asc())
+        .all()
+    )
+    for profile in profiles:
+        running_count = db.query(Job).filter(
+            Job.profile_id == profile.id,
+            Job.status.in_(ACTIVE_JOB_STATUSES),
+        ).count()
+        if running_count < (profile.concurrency_limit or 1):
+            return profile
+    return None
 
 
 def _artifact_is_publishable(artifact: JobArtifact) -> bool:

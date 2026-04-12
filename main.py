@@ -36,6 +36,7 @@ app.include_router(jobs.router, prefix="/api/v1/jobs", tags=["Jobs"])
 app.include_router(jobs.internal_router, prefix="/api/v1/internal/jobs", tags=["Internal Jobs"])
 app.include_router(profiles.external_router, prefix="/api/v1/client/profiles", tags=["Client Profiles"])
 app.include_router(jobs.external_router, prefix="/api/v1/client/jobs", tags=["Client Jobs"])
+app.include_router(jobs.gateway_router, prefix="/api/v1/gateway", tags=["Gateway"])
 
 @app.get("/")
 def read_root():
